@@ -10,6 +10,8 @@ from daly_logger.data_logger import DataLogger
 
 _ESTIMATE_MIN_SAMPLES = 10
 _ESTIMATE_SLOPE_THRESHOLD = 0.001  # %/s minimum meaningful rate
+_EMA_ALPHA = 0.15
+_RATE_ZERO_THRESHOLD = 5e-4  # %/s — suppress extrapolation below this
 
 
 def _format_minutes(minutes: float | None) -> str | None:
@@ -34,68 +36,33 @@ class BMSWorker(QThread):
         mac: str,
         db_path: str = "bms_log.db",
         name: str = "",
-        enable_ros2: bool = False,
     ):
         super().__init__()
         self._mac = mac
         self._name = name or mac
-        self._enable_ros2 = enable_ros2
         self._logger = DataLogger(db_path, device_id=mac)
         self._stop_event = None
         self._loop = None
         self._bms = None
-        self._soc_history: deque = deque(maxlen=60)
+        self._soc_history: deque = deque(maxlen=120)
         self._last_mode: str | None = None
         self._last_temp: dict | None = None
-        self._ros2_pub = None
+        self._remaining_capacity_ah: float | None = None
+        self._rate_ema: float | None = None
 
     def run(self):
         self._loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self._loop)
         self._stop_event = asyncio.Event()
         self._logger.open()
-        if self._enable_ros2:
-            self._init_ros2()
         try:
             self._loop.run_until_complete(self._poll_loop())
         finally:
             self._logger.close()
-            self._shutdown_ros2()
 
     def stop(self):
         if self._loop and self._stop_event:
             self._loop.call_soon_threadsafe(self._stop_event.set)
-
-    # ------------------------------------------------------------------
-    # ROS2
-    # ------------------------------------------------------------------
-
-    def _init_ros2(self):
-        try:
-            from daly_logger.ros2_bridge import BMSRos2Publisher, HAS_ROS2
-            if not HAS_ROS2:
-                return
-            import threading
-            import rclpy
-            rclpy.init()
-            safe_name = "bms_" + self._mac.replace(":", "_").lower()
-            self._ros2_pub = BMSRos2Publisher(safe_name)
-            t = threading.Thread(
-                target=rclpy.spin, args=(self._ros2_pub,), daemon=True
-            )
-            t.start()
-        except Exception:
-            self._ros2_pub = None
-
-    def _shutdown_ros2(self):
-        if self._ros2_pub is None:
-            return
-        try:
-            import rclpy
-            self._ros2_pub.destroy_node()
-            rclpy.shutdown()
-        except Exception:
-            pass
 
     # ------------------------------------------------------------------
     # Connection
@@ -167,7 +134,7 @@ class BMSWorker(QThread):
                 if record.get("ts"):
                     self._logger.insert(record)
 
-                self._emit_estimates(record.get("soc"))
+                self._emit_estimates(record.get("soc"), record.get("current"))
 
                 # --- slow tier (every 5s) ---
                 slow_counter += 1
@@ -184,8 +151,10 @@ class BMSWorker(QThread):
                     mosfet = await self._bms.get_mosfet_status()
                     if mosfet:
                         self._last_mode = mosfet.get("mode")
+                        self._remaining_capacity_ah = mosfet.get("capacity_ah")
                         self.mosfet_updated.emit(dict(mosfet, device_id=self._mac))
                         record["mode"] = self._last_mode
+                        record["capacity_ah"] = self._remaining_capacity_ah
 
                     errors = await self._bms.get_errors()
                     if errors is not False:
@@ -211,13 +180,47 @@ class BMSWorker(QThread):
     # Estimates
     # ------------------------------------------------------------------
 
-    def _emit_estimates(self, soc_pct: float | None):
+    def _emit_estimates(self, soc_pct: float | None, current: float | None):
+        null_result = {"rate_pct_per_min": None, "time_to_full_min": None,
+                       "time_to_20_min": None, "time_to_empty_min": None}
+
+        # -- Primary: current-based coulomb counting --
+        if (current is not None and soc_pct is not None and soc_pct > 0
+                and self._remaining_capacity_ah is not None):
+            remaining = self._remaining_capacity_ah
+            rated = remaining / (soc_pct / 100.0)
+
+            raw_rate = (current / rated) * 100.0 / 60.0  # %/min
+            if self._rate_ema is None:
+                self._rate_ema = raw_rate
+            else:
+                self._rate_ema = _EMA_ALPHA * raw_rate + (1 - _EMA_ALPHA) * self._rate_ema
+
+            rate = self._rate_ema
+            result: dict = {"rate_pct_per_min": rate}
+            if abs(rate / 60.0) < _RATE_ZERO_THRESHOLD:
+                result.update({"time_to_full_min": None, "time_to_20_min": None,
+                               "time_to_empty_min": None})
+            elif rate > 0:  # charging
+                result.update({"time_to_full_min": (rated - remaining) / current * 60.0,
+                               "time_to_20_min": None, "time_to_empty_min": None})
+            else:  # discharging
+                abs_c = abs(current)
+                result.update({
+                    "time_to_full_min": None,
+                    "time_to_20_min": (
+                        (remaining - 0.2 * rated) / abs_c * 60.0 if soc_pct > 20 else None
+                    ),
+                    "time_to_empty_min": remaining / abs_c * 60.0,
+                })
+            self.estimates_updated.emit(result)
+            return
+
+        # -- Fallback: SOC linear regression (before mosfet data arrives) --
+        self._rate_ema = None
         hist = self._soc_history
         if len(hist) < _ESTIMATE_MIN_SAMPLES or soc_pct is None:
-            self.estimates_updated.emit(
-                {"rate_pct_per_min": None, "time_to_full_min": None,
-                 "time_to_20_min": None, "time_to_empty_min": None}
-            )
+            self.estimates_updated.emit(null_result)
             return
 
         ts_arr = np.array([h[0] for h in hist])
@@ -225,25 +228,18 @@ class BMSWorker(QThread):
         slope_per_s = np.polyfit(ts_arr - ts_arr[0], soc_arr, 1)[0]  # %/s
 
         if abs(slope_per_s) < _ESTIMATE_SLOPE_THRESHOLD:
-            self.estimates_updated.emit(
-                {"rate_pct_per_min": 0.0, "time_to_full_min": None,
-                 "time_to_20_min": None, "time_to_empty_min": None}
-            )
+            self.estimates_updated.emit({"rate_pct_per_min": 0.0, "time_to_full_min": None,
+                                         "time_to_20_min": None, "time_to_empty_min": None})
             return
 
-        rate = slope_per_s * 60  # %/min
-        result: dict = {"rate_pct_per_min": rate}
-
-        if slope_per_s > 0:  # charging
-            result["time_to_full_min"] = (100.0 - soc_pct) / rate if rate > 0 else None
-            result["time_to_20_min"] = None
-            result["time_to_empty_min"] = None
+        rate = slope_per_s * 60.0  # %/min
+        if rate > 0:  # charging
+            result = {"rate_pct_per_min": rate,
+                      "time_to_full_min": (100.0 - soc_pct) / rate,
+                      "time_to_20_min": None, "time_to_empty_min": None}
         else:  # discharging
-            result["time_to_full_min"] = None
-            discharge_rate = -rate
-            result["time_to_20_min"] = (
-                (soc_pct - 20.0) / discharge_rate if soc_pct > 20 else None
-            )
-            result["time_to_empty_min"] = soc_pct / discharge_rate
-
+            dr = -rate
+            result = {"rate_pct_per_min": rate, "time_to_full_min": None,
+                      "time_to_20_min": (soc_pct - 20.0) / dr if soc_pct > 20 else None,
+                      "time_to_empty_min": soc_pct / dr}
         self.estimates_updated.emit(result)

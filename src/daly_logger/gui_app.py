@@ -8,10 +8,9 @@ from pathlib import Path
 import numpy as np
 import pyqtgraph as pg
 
-from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal
+from PyQt5.QtCore import Qt, QFileSystemWatcher, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
-    QCheckBox,
     QDateTimeEdit,
     QDialog,
     QDialogButtonBox,
@@ -39,7 +38,6 @@ from PyQt5.QtWidgets import (
 
 from daly_logger.bms_worker import BMSWorker
 from daly_logger.data_logger import query_range, list_devices
-from daly_logger.ros2_bridge import HAS_ROS2
 
 DB_PATH = "bms_log.db"
 DEVICES_FILE = "devices.json"
@@ -586,6 +584,7 @@ class DeviceDetailWidget(QWidget):
 class DeviceCard(QFrame):
     view_details_clicked = pyqtSignal(str)
     remove_requested = pyqtSignal(str)
+    robot_toggled = pyqtSignal(str, bool)
 
     def __init__(self, mac: str, name: str):
         super().__init__()
@@ -609,6 +608,22 @@ class DeviceCard(QFrame):
         view_btn.setFixedHeight(22)
         view_btn.clicked.connect(lambda: self.view_details_clicked.emit(self._mac))
         row1.addWidget(view_btn)
+        self.btn_robot = QPushButton("Robot")
+        self.btn_robot.setCheckable(True)
+        self.btn_robot.setFixedWidth(52)
+        self.btn_robot.setFixedHeight(22)
+        self.btn_robot.setStyleSheet(
+            "QPushButton:checked  { background: #1565c0; color: white; border: none;"
+            " padding: 2px 6px; border-radius: 3px; }"
+            "QPushButton:!checked { background: #bbb; color: #555; border: none;"
+            " padding: 2px 6px; border-radius: 3px; }"
+            "QPushButton:disabled { background: #ddd; color: #aaa; border: none;"
+            " padding: 2px 6px; border-radius: 3px; }"
+        )
+        self.btn_robot.clicked.connect(
+            lambda checked: self.robot_toggled.emit(self._mac, checked)
+        )
+        row1.addWidget(self.btn_robot)
         remove_btn = QPushButton("✕")
         remove_btn.setFixedWidth(26)
         remove_btn.setFixedHeight(22)
@@ -660,6 +675,11 @@ class DeviceCard(QFrame):
         p = data.get("power")
         self.lbl_power.setText(f"{p:+.1f}W" if p is not None else "—W")
 
+    def set_robot_selected(self, is_robot: bool):
+        self.btn_robot.blockSignals(True)
+        self.btn_robot.setChecked(is_robot)
+        self.btn_robot.blockSignals(False)
+
 
 # ---------------------------------------------------------------------------
 # Overview tab
@@ -669,6 +689,7 @@ class OverviewTab(QWidget):
     add_device_requested = pyqtSignal()
     view_device_requested = pyqtSignal(str)
     remove_device_requested = pyqtSignal(str)
+    robot_toggled = pyqtSignal(str, bool)
 
     def __init__(self):
         super().__init__()
@@ -696,6 +717,7 @@ class OverviewTab(QWidget):
         card = DeviceCard(mac, name)
         card.view_details_clicked.connect(self.view_device_requested.emit)
         card.remove_requested.connect(self.remove_device_requested.emit)
+        card.robot_toggled.connect(self.robot_toggled)
         self._cards[mac] = card
         self._cards_layout.addWidget(card)
         return card
@@ -738,7 +760,6 @@ class ConnectDialog(QDialog):
         self.setMinimumWidth(440)
         self.selected_mac = None
         self.selected_name = None
-        self.enable_ros2 = False
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("Scan for nearby Bluetooth devices and select your BMS:"))
@@ -757,12 +778,6 @@ class ConnectDialog(QDialog):
         btn_row.addWidget(self.scan_btn)
         btn_row.addStretch()
         layout.addLayout(btn_row)
-
-        if HAS_ROS2:
-            self.ros2_check = QCheckBox("Enable ROS2 publishing (sensor_msgs/BatteryState)")
-            layout.addWidget(self.ros2_check)
-        else:
-            self.ros2_check = None
 
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         btns.accepted.connect(self._accept)
@@ -803,8 +818,6 @@ class ConnectDialog(QDialog):
         address, name = items[0].data(Qt.UserRole)
         self.selected_mac = address
         self.selected_name = name
-        if self.ros2_check:
-            self.enable_ros2 = self.ros2_check.isChecked()
         self.accept()
 
 
@@ -858,10 +871,17 @@ class MainWindow(QMainWindow):
         self._overview.add_device_requested.connect(self._on_add_device)
         self._overview.view_device_requested.connect(self._show_device_detail)
         self._overview.remove_device_requested.connect(self._remove_device)
+        self._overview.robot_toggled.connect(self._on_robot_toggled)
 
         self.workers: dict[str, BMSWorker] = {}
         self._details: dict[str, DeviceDetailWidget] = {}
         self._device_names: dict[str, str] = {}
+        self._robot_mac: str | None = None
+
+        self._file_watcher = QFileSystemWatcher()
+        if Path(DEVICES_FILE).exists():
+            self._file_watcher.addPath(DEVICES_FILE)
+        self._file_watcher.fileChanged.connect(self._on_devices_file_changed)
 
         saved = _load_saved_devices()
         if saved:
@@ -888,7 +908,7 @@ class MainWindow(QMainWindow):
             if mac in self.workers:
                 self._status_bar.showMessage(f"{mac} is already connected.")
                 return
-            self._add_device(mac, name, enable_ros2=dlg.enable_ros2)
+            self._add_device(mac, name)
         elif startup:
             self.close()
 
@@ -898,24 +918,32 @@ class MainWindow(QMainWindow):
             name = dev.get("name", mac)
             if mac and mac not in self.workers:
                 self._add_device(mac, name)
+        for dev in saved:
+            mac = dev.get("mac", "")
+            if dev.get("robot") and mac in self.workers:
+                self._on_robot_toggled(mac, True)
 
     def _on_add_device(self):
         self._show_connect_dialog(startup=False)
 
     def _persist_devices(self):
         _save_devices([
-            {"mac": mac, "name": self._device_names.get(mac, mac)}
+            {"mac": mac, "name": self._device_names.get(mac, mac),
+             "robot": mac == self._robot_mac}
             for mac in self.workers
         ])
+        # Re-watch after write (atomic replace changes the inode)
+        if DEVICES_FILE not in self._file_watcher.files():
+            self._file_watcher.addPath(DEVICES_FILE)
 
-    def _add_device(self, mac: str, name: str, enable_ros2: bool = False):
+    def _add_device(self, mac: str, name: str):
         card = self._overview.add_card(mac, name)
 
         detail = DeviceDetailWidget()
         self._details[mac] = detail
         self._detail_stack.addWidget(detail)
 
-        worker = BMSWorker(mac, DB_PATH, name=name, enable_ros2=enable_ros2)
+        worker = BMSWorker(mac, DB_PATH, name=name)
 
         worker.soc_updated.connect(detail.dashboard.update_soc)
         worker.soc_updated.connect(detail.live_charts.update_soc)
@@ -937,6 +965,8 @@ class MainWindow(QMainWindow):
         self._refresh_history_devices()
 
     def _remove_device(self, mac: str):
+        if self._robot_mac == mac:
+            self._robot_mac = None
         worker = self.workers.pop(mac, None)
         if worker:
             worker.stop()
@@ -960,6 +990,48 @@ class MainWindow(QMainWindow):
             card.update_connection(state)
         name = self._device_names.get(mac, mac)
         self._status_bar.showMessage(f"{name}: {state}")
+
+    def _on_devices_file_changed(self, path: str):
+        # Re-add after external atomic write (inode replaced)
+        if path not in self._file_watcher.files():
+            self._file_watcher.addPath(path)
+
+        saved = _load_saved_devices()
+        new_robot_mac = next((d["mac"] for d in saved if d.get("robot")), None)
+        if new_robot_mac == self._robot_mac:
+            return
+
+        # Deselect old robot without persisting (avoids write loop)
+        if self._robot_mac:
+            old_card = self._overview.get_card(self._robot_mac)
+            if old_card:
+                old_card.set_robot_selected(False)
+
+        self._robot_mac = new_robot_mac
+
+        # Select new robot
+        if new_robot_mac:
+            card = self._overview.get_card(new_robot_mac)
+            if card:
+                card.set_robot_selected(True)
+
+    def _on_robot_toggled(self, mac: str, is_robot: bool):
+        if is_robot:
+            if self._robot_mac and self._robot_mac != mac:
+                old_card = self._overview.get_card(self._robot_mac)
+                if old_card:
+                    old_card.set_robot_selected(False)
+            self._robot_mac = mac
+            card = self._overview.get_card(mac)
+            if card:
+                card.set_robot_selected(True)
+        else:
+            if self._robot_mac == mac:
+                self._robot_mac = None
+            card = self._overview.get_card(mac)
+            if card:
+                card.set_robot_selected(False)
+        self._persist_devices()
 
     def _refresh_history_devices(self):
         try:

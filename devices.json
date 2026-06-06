@@ -1,10 +1,7 @@
 [
   {
     "mac": "D2:1A:03:01:30:51",
-    "name": "EIC-Walkie-LFP-01"
-  },
-  {
-    "mac": "D2:1A:03:01:30:56",
-    "name": "EIC-Walkie-LFP-02"
+    "name": "EIC-Walkie-LFP-01",
+    "robot": true
   }
 ]

@@ -16,9 +16,10 @@ CREATE TABLE IF NOT EXISTS readings (
     cell_max  REAL,
     temp_min  REAL,
     temp_max  REAL,
-    mode      TEXT,
-    errors    TEXT,
-    power     REAL
+    mode        TEXT,
+    errors      TEXT,
+    power       REAL,
+    capacity_ah REAL
 );
 CREATE INDEX IF NOT EXISTS idx_ts ON readings(ts);
 """
@@ -26,15 +27,16 @@ CREATE INDEX IF NOT EXISTS idx_ts ON readings(ts);
 INSERT_SQL = """
 INSERT INTO readings
     (ts, device_id, voltage, current, soc, cell_min, cell_max,
-     temp_min, temp_max, mode, errors, power)
+     temp_min, temp_max, mode, errors, power, capacity_ah)
 VALUES
     (:ts, :device_id, :voltage, :current, :soc, :cell_min, :cell_max,
-     :temp_min, :temp_max, :mode, :errors, :power)
+     :temp_min, :temp_max, :mode, :errors, :power, :capacity_ah)
 """
 
 _MIGRATIONS = [
     "ALTER TABLE readings ADD COLUMN device_id TEXT NOT NULL DEFAULT 'default'",
     "ALTER TABLE readings ADD COLUMN power REAL",
+    "ALTER TABLE readings ADD COLUMN capacity_ah REAL",
 ]
 
 
@@ -60,6 +62,8 @@ class DataLogger:
         )
         if "power" not in existing:
             self._conn.execute(_MIGRATIONS[1])
+        if "capacity_ah" not in existing:
+            self._conn.execute(_MIGRATIONS[2])
 
     def insert(self, record: dict):
         if self._conn is None:
@@ -77,6 +81,7 @@ class DataLogger:
             "mode": record.get("mode"),
             "errors": json.dumps(record.get("errors", [])),
             "power": record.get("power"),
+            "capacity_ah": record.get("capacity_ah"),
         }
         self._conn.execute(INSERT_SQL, row)
 

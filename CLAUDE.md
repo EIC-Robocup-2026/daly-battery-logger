@@ -27,12 +27,14 @@ The app is a PyQt5 desktop monitor for a Daly BMS (Battery Management System) co
 **Threading model:** The GUI runs on the main Qt thread. `BMSWorker` (`bms_worker.py`) is a `QThread` that owns its own `asyncio` event loop for all BLE I/O. It communicates back to the GUI exclusively via `pyqtSignal` emissions — never by touching Qt widgets directly.
 
 **Polling tiers in `BMSWorker._poll_loop()`:**
-- Fast tier (every ~1 s): SOC + cell voltage range → logged to SQLite each cycle
-- Slow tier (every ~5 s): temperature, MOSFET status, errors
+- Fast tier (every ~1 s): SOC + cell voltage range → logged to SQLite each cycle (includes last-cached `capacity_ah`)
+- Slow tier (every ~5 s): temperature, MOSFET status (caches `remaining_capacity_ah`), errors
 
 **Signal fan-out:** `MainWindow._start_worker()` wires each `BMSWorker` signal to the relevant tab update methods. `soc_updated` feeds both `DashboardTab` and `LiveChartsTab`; `temp_updated` feeds both as well.
 
-**Persistence:** `DataLogger` (`data_logger.py`) wraps a SQLite connection in autocommit mode. `query_range()` (same file) returns a `pandas.DataFrame` for the History tab's date-range queries and CSV export.
+**Persistence:** `DataLogger` (`data_logger.py`) wraps a SQLite connection in autocommit mode. `query_range()` (same file) returns a `pandas.DataFrame` for the History tab's date-range queries and CSV export. Schema migrations run automatically on `open()` — new columns (`device_id`, `power`, `capacity_ah`) are added via `ALTER TABLE` if missing.
+
+**Rate estimates:** `BMSWorker._emit_estimates()` uses coulomb-counting as the primary algorithm once `capacity_ah` (remaining Ah from the MOSFET frame) is available — `rate = (current / rated_capacity) * 100 / 60` (%/min) with EMA smoothing. Falls back to SOC linear regression for the first ~5 s before the slow tier's first MOSFET poll. The web UI (`index.html`) uses the same algorithm from the live buffer (no EMA since it's stateless); `capacity_ah` reaches it via the WebSocket broadcast once it's stored in SQLite.
 
 **GUI tabs** (all in `gui_app.py`):
 - `DashboardTab` — live text readouts for all BMS values

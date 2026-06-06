@@ -110,6 +110,18 @@ body {
 .dc-mac { font-size: .6rem; color: var(--text2); margin-bottom: .25rem; }
 .dc-stats { display: flex; gap: .6rem; font-size: .7rem; color: var(--text2); }
 
+/* ── Robot button + badge ── */
+.robot-btn {
+  font-size: .58rem; font-weight: 700; line-height: 1;
+  border: 1px solid #475569; border-radius: .25rem;
+  padding: 2px 6px; cursor: pointer; flex-shrink: 0;
+  background: #1e293b; color: #94a3b8;
+  transition: background .15s, color .15s, border-color .15s;
+}
+.robot-btn:hover { border-color: #64748b; color: #cbd5e1; }
+.robot-btn.active { background: #1d4ed8; color: #fff; border-color: #2563eb; }
+.robot-badge { color: #60a5fa; font-weight: 700; font-size: .68rem; }
+
 /* ── No-device placeholder ── */
 #no-device-placeholder {
   flex: 1; display: flex; align-items: center; justify-content: center;
@@ -410,11 +422,12 @@ function makeDataset(label, color, data) {
 }
 
 // ── State ─────────────────────────────────────────────────────────────────
-let devices        = [];   // [{mac, name}]
+let devices        = [];   // [{mac, name, robot}]
 let latestByDevice = {};   // mac → row
 let liveBuffer     = [];   // rolling 900 s
 let selectedDevice = null;
 let liveWindow     = 300;
+let robotMac       = null;
 let histData       = [];
 const liveVisible  = new Set(SERIES.map(s=>s.key));
 const histVisible  = new Set(SERIES.map(s=>s.key));
@@ -496,20 +509,36 @@ function getDeviceName(mac) {
   return d ? d.name : mac;
 }
 
+// ── Robot selection ───────────────────────────────────────────────────────
+async function toggleRobot(mac, event) {
+  event.stopPropagation();
+  const newMac = (robotMac === mac) ? null : mac;
+  robotMac = newMac;           // optimistic local update
+  renderDeviceCards();
+  await fetch('/api/robot', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ mac: newMac }),
+  }).catch(() => {});
+  // WS broadcast will confirm/sync other tabs
+}
+
 // ── Device cards ──────────────────────────────────────────────────────────
+const MAC_RE = /^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/;
 function renderDeviceCards() {
   const el = document.getElementById('device-cards');
-  const macs = Object.keys(latestByDevice);
+  const macs = Object.keys(latestByDevice).filter(m => MAC_RE.test(m));
   if (!macs.length) {
     el.innerHTML = '<div style="font-size:.72rem;color:var(--text2);text-align:center;padding:.75rem">No devices</div>';
     return;
   }
   el.innerHTML = '';
   macs.forEach(mac => {
-    const r    = latestByDevice[mac];
-    const name = getDeviceName(mac);
-    const age  = Date.now()/1000 - r.ts;
-    const live = age < 15;
+    const r       = latestByDevice[mac];
+    const name    = getDeviceName(mac);
+    const age     = Date.now()/1000 - r.ts;
+    const live    = age < 15;
+    const isRobot = mac === robotMac;
 
     const card = document.createElement('div');
     card.className = 'device-card' + (mac === selectedDevice ? ' selected' : '');
@@ -517,13 +546,16 @@ function renderDeviceCards() {
       <div class="dc-row1">
         <span class="dc-name">${esc(name)}</span>
         <span class="dc-dot ${live ? 'live' : ''}"></span>
+        <button class="robot-btn${isRobot ? ' active' : ''}" title="${isRobot ? 'Unset robot battery' : 'Set as robot battery'}">Robot</button>
       </div>
       <div class="dc-mac">${esc(mac)}</div>
       <div class="dc-stats">
         <span style="font-weight:700;color:${socColor(r.soc)}">${r.soc != null ? r.soc.toFixed(1)+'%' : '—'}</span>
         <span>${r.voltage != null ? r.voltage.toFixed(2)+'V' : '—'}</span>
         <span>${r.power   != null ? (r.power>=0?'+':'')+r.power.toFixed(1)+'W' : '—'}</span>
+        ${isRobot ? '<span class="robot-badge">● Robot</span>' : ''}
       </div>`;
+    card.querySelector('.robot-btn').addEventListener('click', e => toggleRobot(mac, e));
     card.addEventListener('click', () => selectDevice(mac));
     el.appendChild(card);
   });
@@ -564,14 +596,33 @@ function updateDashboard() {
   document.getElementById('d-cap').textContent      = '—';
 
   // Estimates (computed from live buffer, last 120 s)
-  const now   = Date.now() / 1000;
-  const buf   = liveBuffer.filter(x => x.device_id === selectedDevice && x.ts >= now-120 && x.soc != null);
+  const now = Date.now() / 1000;
+  const buf = liveBuffer.filter(x => x.device_id === selectedDevice && x.ts >= now-120 && x.soc != null);
   let rate = null;
-  if (buf.length >= 2) {
-    const dt = (buf[buf.length-1].ts - buf[0].ts) / 60;
-    if (dt > 0.2) {
-      rate = (buf[buf.length-1].soc - buf[0].soc) / dt;
-      if (Math.abs(rate) < 0.001) rate = null;
+
+  // Primary: coulomb-counting from most recent record with current + capacity_ah
+  if (buf.length >= 1) {
+    const rec = [...buf].reverse().find(x => x.current != null && x.capacity_ah != null && x.soc > 0);
+    if (rec) {
+      const remaining = rec.capacity_ah;
+      const rated = remaining / (rec.soc / 100.0);
+      const r0 = (rec.current / rated) * 100.0 / 60.0;  // %/min
+      if (Math.abs(r0 / 60.0) >= 5e-4) rate = r0;
+    }
+  }
+
+  // Fallback: linear regression over SOC history (before capacity_ah arrives)
+  if (rate === null && buf.length >= 10) {
+    const ts0 = buf[0].ts;
+    const n = buf.length;
+    const sumT  = buf.reduce((a, x) => a + (x.ts - ts0), 0);
+    const sumS  = buf.reduce((a, x) => a + x.soc, 0);
+    const sumTT = buf.reduce((a, x) => a + (x.ts - ts0) ** 2, 0);
+    const sumTS = buf.reduce((a, x) => a + (x.ts - ts0) * x.soc, 0);
+    const denom = n * sumTT - sumT * sumT;
+    if (Math.abs(denom) > 1e-9) {
+      const slopePerSec = (n * sumTS - sumT * sumS) / denom;
+      if (Math.abs(slopePerSec) >= 0.001) rate = slopePerSec * 60;
     }
   }
   document.getElementById('d-rate').textContent     = rate != null ? rate.toFixed(3) : '—';
@@ -636,17 +687,25 @@ function connectWS() {
   };
 
   ws.onmessage = e => {
-    const rows = JSON.parse(e.data);
+    const msg = JSON.parse(e.data);
+
+    // Control message (e.g. robot selection sync)
+    if (!Array.isArray(msg)) {
+      if (msg.type === 'robot') {
+        robotMac = msg.mac;
+        renderDeviceCards();
+      }
+      return;
+    }
+
+    const rows = msg;
     rows.forEach(r => { liveBuffer.push(r); latestByDevice[r.device_id] = r; });
     const cutoff = Date.now()/1000 - 900;
     while (liveBuffer.length && liveBuffer[0].ts < cutoff) liveBuffer.shift();
 
     renderDeviceCards();
 
-    // Auto-select first device if none selected yet
-    if (!selectedDevice && Object.keys(latestByDevice).length) {
-      selectDevice(Object.keys(latestByDevice)[0]);
-    } else if (selectedDevice && rows.some(r => r.device_id === selectedDevice)) {
+    if (selectedDevice && rows.some(r => r.device_id === selectedDevice)) {
       updateDashboard();
       updateLiveCharts();
     }
@@ -664,7 +723,12 @@ function connectWS() {
 
 // ── History device dropdown ───────────────────────────────────────────────
 async function loadDevices() {
-  devices = await fetch('/api/devices').then(r=>r.json()).catch(()=>[]);
+  const [devList, robotResp] = await Promise.all([
+    fetch('/api/devices').then(r=>r.json()).catch(()=>[]),
+    fetch('/api/robot').then(r=>r.json()).catch(()=>({mac:null})),
+  ]);
+  devices = devList;
+  robotMac = robotResp.mac;
   const sel = document.getElementById('hist-device-sel');
   sel.innerHTML = '<option value="">All devices</option>';
   devices.forEach(d => {
