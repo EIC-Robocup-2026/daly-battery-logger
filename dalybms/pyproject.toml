@@ -1,0 +1,11 @@
+[project]
+name = "dalybms"
+version = "0.1.0.post1"
+description = "Daly BMS library (patched for Bluetooth compatibility)"
+requires-python = ">=3.11"
+dependencies = [
+    "pyserial",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
