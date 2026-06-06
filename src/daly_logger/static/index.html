@@ -1,0 +1,728 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Daly BMS Monitor</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@3.0.0/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+<style>
+:root {
+  --bg:     #0f172a;
+  --card:   #1e293b;
+  --card2:  #0d1b2e;
+  --border: #334155;
+  --text1:  #f1f5f9;
+  --text2:  #94a3b8;
+  --accent: #3b82f6;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
+body {
+  background: var(--bg);
+  color: var(--text1);
+  font-family: system-ui, sans-serif;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* ── Header ── */
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: .45rem 1rem;
+  background: var(--card);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.app-title { font-size: 1rem; font-weight: 700; }
+#ws-status {
+  font-size: .7rem; padding: 2px 10px; border-radius: 9999px;
+  background: var(--card); border: 1px solid var(--border); color: var(--text2);
+}
+
+/* ── Main tabs ── */
+.main-tabs {
+  display: flex;
+  background: var(--card);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  padding: 0 1rem;
+}
+.main-tab-btn {
+  padding: .45rem 1.2rem;
+  font-size: .78rem; font-weight: 600;
+  border: none; background: none; color: var(--text2); cursor: pointer;
+  border-bottom: 2px solid transparent; margin-bottom: -1px;
+  transition: color .15s, border-color .15s;
+}
+.main-tab-btn.active { color: var(--text1); border-bottom-color: var(--accent); }
+
+/* ── Tab panels ── */
+.tab-panel { display: none; flex: 1; overflow: hidden; }
+.tab-panel.active { display: flex; flex-direction: column; }
+
+/* ── Devices layout ── */
+.devices-layout { display: flex; flex: 1; overflow: hidden; }
+
+.devices-left {
+  width: 256px;
+  flex-shrink: 0;
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  padding: .75rem;
+  display: flex;
+  flex-direction: column;
+  gap: .4rem;
+  background: #0c1525;
+}
+.devices-list-hdr {
+  font-size: .65rem; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .09em; color: var(--text2); margin-bottom: .25rem;
+}
+
+.devices-right {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ── Device card ── */
+.device-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: .5rem;
+  padding: .55rem .7rem;
+  cursor: pointer;
+  transition: border-color .15s;
+  flex-shrink: 0;
+}
+.device-card:hover { border-color: #475569; }
+.device-card.selected { border-color: var(--accent); background: #1a3050; }
+.dc-row1 { display: flex; align-items: center; gap: .35rem; margin-bottom: .15rem; }
+.dc-name { font-weight: 700; font-size: .82rem; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.dc-dot { width: 7px; height: 7px; border-radius: 50%; background: #475569; flex-shrink: 0; }
+.dc-dot.live { background: #22c55e; }
+.dc-mac { font-size: .6rem; color: var(--text2); margin-bottom: .25rem; }
+.dc-stats { display: flex; gap: .6rem; font-size: .7rem; color: var(--text2); }
+
+/* ── No-device placeholder ── */
+#no-device-placeholder {
+  flex: 1; display: flex; align-items: center; justify-content: center;
+  color: var(--text2); font-size: .85rem; text-align: center; padding: 2rem;
+}
+
+/* ── Device detail ── */
+#device-detail { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+
+.detail-tabs {
+  display: flex;
+  background: var(--card);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  padding: 0 .75rem;
+}
+.detail-tab-btn {
+  padding: .38rem .9rem;
+  font-size: .75rem; font-weight: 600;
+  border: none; background: none; color: var(--text2); cursor: pointer;
+  border-bottom: 2px solid transparent; margin-bottom: -1px;
+  transition: color .15s, border-color .15s;
+}
+.detail-tab-btn.active { color: var(--text1); border-bottom-color: var(--accent); }
+
+.detail-panel { display: none; flex: 1; overflow-y: auto; padding: 1rem; }
+.detail-panel.active { display: block; }
+
+/* ── Dashboard ── */
+.soc-big {
+  text-align: center;
+  font-size: 3.8rem; font-weight: 800; line-height: 1;
+  margin-bottom: 1rem; color: #22c55e;
+}
+.soc-big.soc-low { color: #ef4444; }
+.soc-big.soc-mid { color: #f97316; }
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: .5rem;
+  margin-bottom: .75rem;
+}
+.stat-cell {
+  background: var(--card2);
+  border: 1px solid var(--border);
+  border-radius: .4rem;
+  padding: .4rem .6rem;
+}
+.stat-lbl { font-size: .6rem; text-transform: uppercase; letter-spacing: .06em; color: var(--text2); margin-bottom: .1rem; }
+.stat-val { font-size: 1.05rem; font-weight: 700; }
+
+.estimates-bar {
+  display: flex; flex-wrap: wrap; gap: .3rem 1rem;
+  font-size: .72rem; color: var(--text2);
+  padding: .5rem .1rem;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: .75rem;
+}
+.estimates-bar strong { color: var(--text1); }
+
+.errors-hdr {
+  font-size: .62rem; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .08em; color: var(--text2); margin-bottom: .35rem;
+}
+#d-errors {
+  list-style: none;
+  max-height: 110px;
+  overflow-y: auto;
+  font-size: .76rem;
+}
+#d-errors li { padding: .18rem .35rem; border-radius: .25rem; }
+#d-errors li.err { color: #fca5a5; background: rgba(239,68,68,.1); margin-bottom: 2px; }
+#d-errors li.ok  { color: var(--text2); }
+
+/* ── Live Charts ── */
+.lc-hdr {
+  display: flex; flex-wrap: wrap; align-items: center;
+  gap: .4rem; margin-bottom: .6rem;
+}
+.tog {
+  border: none; border-radius: .3rem; padding: 2px 9px;
+  font-size: .68rem; font-weight: 600; cursor: pointer;
+  color: #fff; transition: opacity .15s, filter .15s;
+}
+.tog.off { opacity: .22; filter: saturate(0); }
+.win-ctrl {
+  display: flex; align-items: center; gap: .3rem;
+  font-size: .7rem; color: var(--text2); margin-left: auto;
+}
+input[type=range] { accent-color: var(--accent); }
+
+.cpanel { margin-bottom: .4rem; }
+.cpanel.hidden { display: none; }
+.clabel { font-size: .6rem; color: var(--text2); padding: 1px 3px; }
+
+/* ── History tab ── */
+.history-panel {
+  flex: 1; overflow-y: auto; padding: 1rem;
+  display: flex; flex-direction: column; gap: .6rem;
+}
+.hist-ctrl {
+  display: flex; flex-wrap: wrap; align-items: center; gap: .4rem;
+}
+.ctrl-lbl { font-size: .72rem; color: var(--text2); }
+
+input[type=datetime-local], select {
+  background: var(--card); border: 1px solid var(--border); color: var(--text1);
+  border-radius: .3rem; padding: 3px 8px; font-size: .76rem; color-scheme: dark;
+}
+.btn-primary {
+  background: #2563eb; color: #fff; border: none;
+  border-radius: .35rem; padding: 4px 13px; font-size: .76rem; cursor: pointer;
+}
+.btn-primary:hover { background: #1d4ed8; }
+.btn-sec {
+  background: var(--border); color: var(--text1); border: none;
+  border-radius: .35rem; padding: 4px 13px; font-size: .76rem; cursor: pointer;
+}
+.btn-sec:hover { background: #475569; }
+.status-txt { font-size: .7rem; color: var(--text2); }
+
+/* ── Responsive narrow ── */
+@media (max-width: 600px) {
+  .devices-layout { flex-direction: column; }
+  .devices-left {
+    width: 100%; max-height: 170px;
+    flex-direction: row; overflow-x: auto; overflow-y: hidden;
+    border-right: none; border-bottom: 1px solid var(--border);
+    flex-wrap: nowrap;
+  }
+  .device-card { min-width: 170px; }
+}
+</style>
+</head>
+<body>
+
+<!-- ── Header ── -->
+<div class="header">
+  <span class="app-title">⚡ Daly BMS Monitor</span>
+  <span id="ws-status">connecting…</span>
+</div>
+
+<!-- ── Main tab bar ── -->
+<div class="main-tabs">
+  <button class="main-tab-btn active" data-tab="devices">Devices</button>
+  <button class="main-tab-btn"        data-tab="history">History</button>
+</div>
+
+<!-- ══════════════ Devices tab ══════════════ -->
+<div id="tab-devices" class="tab-panel active">
+  <div class="devices-layout">
+
+    <!-- Left: device list -->
+    <div class="devices-left">
+      <div class="devices-list-hdr">Connected Devices</div>
+      <div id="device-cards"></div>
+    </div>
+
+    <!-- Right: detail -->
+    <div class="devices-right">
+
+      <!-- Placeholder -->
+      <div id="no-device-placeholder">Select a device from the list to view details.</div>
+
+      <!-- Detail view (hidden until device selected) -->
+      <div id="device-detail" style="display:none">
+
+        <div class="detail-tabs">
+          <button class="detail-tab-btn active" data-dtab="dashboard">Dashboard</button>
+          <button class="detail-tab-btn"        data-dtab="livecharts">Live Charts</button>
+        </div>
+
+        <!-- Dashboard panel -->
+        <div id="dtab-dashboard" class="detail-panel active">
+
+          <div id="dash-soc" class="soc-big">—</div>
+
+          <div class="stats-grid">
+            <div class="stat-cell"><div class="stat-lbl">Voltage</div><div id="d-voltage" class="stat-val">—</div></div>
+            <div class="stat-cell"><div class="stat-lbl">Current</div><div id="d-current" class="stat-val">—</div></div>
+            <div class="stat-cell"><div class="stat-lbl">Power</div>  <div id="d-power"   class="stat-val">—</div></div>
+            <div class="stat-cell"><div class="stat-lbl">Cell Min</div><div id="d-cell-min" class="stat-val">—</div></div>
+            <div class="stat-cell"><div class="stat-lbl">Cell Max</div><div id="d-cell-max" class="stat-val">—</div></div>
+            <div class="stat-cell"><div class="stat-lbl">Temp Min</div><div id="d-temp-min" class="stat-val">—</div></div>
+            <div class="stat-cell"><div class="stat-lbl">Temp Max</div><div id="d-temp-max" class="stat-val">—</div></div>
+            <div class="stat-cell"><div class="stat-lbl">Mode</div>   <div id="d-mode"     class="stat-val">—</div></div>
+            <div class="stat-cell"><div class="stat-lbl">Capacity</div><div id="d-cap"     class="stat-val">—</div></div>
+          </div>
+
+          <div class="estimates-bar">
+            Rate:&nbsp;<strong><span id="d-rate">—</span>&nbsp;%/min</strong>
+            &nbsp;·&nbsp;
+            To full:&nbsp;<strong><span id="d-to-full">—</span></strong>
+            &nbsp;·&nbsp;
+            To 20%:&nbsp;<strong><span id="d-to-20">—</span></strong>
+            &nbsp;·&nbsp;
+            To empty:&nbsp;<strong><span id="d-to-empty">—</span></strong>
+          </div>
+
+          <div class="errors-hdr">Errors</div>
+          <ul id="d-errors"><li class="ok">—</li></ul>
+
+        </div><!-- /dashboard -->
+
+        <!-- Live Charts panel -->
+        <div id="dtab-livecharts" class="detail-panel">
+          <div class="lc-hdr">
+            <div id="live-tog-bar" style="display:flex;flex-wrap:wrap;gap:.3rem"></div>
+            <div class="win-ctrl">
+              Window:
+              <input type="range" id="live-window" min="60" max="900" value="300" step="30" style="width:80px"/>
+              <span id="live-window-lbl">300s</span>
+            </div>
+          </div>
+          <div id="live-charts-wrap"></div>
+        </div><!-- /livecharts -->
+
+      </div><!-- /device-detail -->
+    </div><!-- /devices-right -->
+  </div><!-- /devices-layout -->
+</div><!-- /tab-devices -->
+
+<!-- ══════════════ History tab ══════════════ -->
+<div id="tab-history" class="tab-panel">
+  <div class="history-panel">
+
+    <div class="hist-ctrl">
+      <label class="ctrl-lbl">From</label>
+      <input type="datetime-local" id="h-start"/>
+      <label class="ctrl-lbl">To</label>
+      <input type="datetime-local" id="h-end"/>
+      <label class="ctrl-lbl">Device</label>
+      <select id="hist-device-sel"><option value="">All devices</option></select>
+      <button class="btn-primary" id="h-load">Load</button>
+      <button class="btn-sec"     id="h-export">Export CSV</button>
+      <span id="h-status" class="status-txt"></span>
+    </div>
+
+    <div style="display:flex;flex-wrap:wrap;gap:.3rem;margin-bottom:.4rem" id="hist-tog-bar"></div>
+    <div id="hist-charts-wrap"></div>
+
+  </div>
+</div><!-- /tab-history -->
+
+<script>
+// ── Series definitions ────────────────────────────────────────────────────
+const SERIES = [
+  { key:'soc',     dbCol:'soc',      label:'SOC (%)',     color:'rgb(31,119,180)'  },
+  { key:'voltage', dbCol:'voltage',  label:'Voltage (V)', color:'rgb(255,127,14)'  },
+  { key:'current', dbCol:'current',  label:'Current (A)', color:'rgb(44,160,44)'   },
+  { key:'power',   dbCol:'power',    label:'Power (W)',   color:'rgb(148,103,189)' },
+  { key:'temp',    dbCol:'temp_max', label:'Temp (°C)',   color:'rgb(214,39,40)'   },
+];
+const DEVICE_COLORS = [
+  'rgb(31,119,180)','rgb(255,127,14)','rgb(44,160,44)',
+  'rgb(214,39,40)','rgb(148,103,189)','rgb(140,86,75)',
+  'rgb(227,119,194)','rgb(127,127,127)',
+];
+
+// ── Chart.js global defaults ──────────────────────────────────────────────
+Chart.defaults.color       = '#94a3b8';
+Chart.defaults.borderColor = 'rgba(148,163,184,0.12)';
+Chart.defaults.font.size   = 10;
+
+function makeChartCfg() {
+  return {
+    type: 'line',
+    data: { datasets: [] },
+    options: {
+      animation: false,
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode:'index', intersect:false },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor:'#1e293b', borderColor:'#334155', borderWidth:1,
+          titleColor:'#94a3b8', bodyColor:'#f1f5f9',
+        },
+      },
+      scales: {
+        x: { type:'time', ticks:{ maxTicksLimit:6, color:'#64748b' }, grid:{ color:'rgba(148,163,184,0.08)' } },
+        y: {              ticks:{ maxTicksLimit:4, color:'#64748b' }, grid:{ color:'rgba(148,163,184,0.08)' } },
+      },
+    },
+  };
+}
+
+function makeDataset(label, color, data) {
+  return {
+    label, data,
+    borderColor: color,
+    backgroundColor: color.replace('rgb','rgba').replace(')',',0.07)'),
+    borderWidth: 1.5, pointRadius: 0, tension: 0.2,
+  };
+}
+
+// ── State ─────────────────────────────────────────────────────────────────
+let devices        = [];   // [{mac, name}]
+let latestByDevice = {};   // mac → row
+let liveBuffer     = [];   // rolling 900 s
+let selectedDevice = null;
+let liveWindow     = 300;
+let histData       = [];
+const liveVisible  = new Set(SERIES.map(s=>s.key));
+const histVisible  = new Set(SERIES.map(s=>s.key));
+const liveCharts   = {};
+const histCharts   = {};
+const livePanels   = {};
+const histPanels   = {};
+
+// ── Build chart panels ────────────────────────────────────────────────────
+function buildPanels(wrapId, togBarId, charts, panels, vis, onToggle) {
+  const wrap   = document.getElementById(wrapId);
+  const togBar = document.getElementById(togBarId);
+  SERIES.forEach(s => {
+    // toggle button
+    const btn = document.createElement('button');
+    btn.className = 'tog';
+    btn.textContent = s.label;
+    btn.style.background = s.color;
+    togBar.appendChild(btn);
+    btn.addEventListener('click', () => {
+      if (vis.has(s.key)) { vis.delete(s.key); btn.classList.add('off');    panels[s.key].classList.add('hidden');    }
+      else                { vis.add(s.key);    btn.classList.remove('off'); panels[s.key].classList.remove('hidden'); }
+      onToggle();
+    });
+    // chart panel
+    const panel = document.createElement('div');
+    panel.className = 'cpanel';
+    const lbl = document.createElement('div');
+    lbl.className = 'clabel'; lbl.textContent = s.label;
+    const cw = document.createElement('div');
+    cw.style.cssText = 'height:120px;position:relative';
+    const canvas = document.createElement('canvas');
+    cw.appendChild(canvas);
+    panel.appendChild(lbl); panel.appendChild(cw);
+    wrap.appendChild(panel);
+    panels[s.key] = panel;
+    charts[s.key] = new Chart(canvas.getContext('2d'), makeChartCfg());
+  });
+}
+
+buildPanels('live-charts-wrap','live-tog-bar', liveCharts, livePanels, liveVisible, ()=>{});
+buildPanels('hist-charts-wrap','hist-tog-bar', histCharts, histPanels, histVisible, ()=>renderHistCharts());
+
+// ── Main tab switching ────────────────────────────────────────────────────
+document.querySelectorAll('.main-tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.main-tab-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    document.getElementById(`tab-${btn.dataset.tab}`).classList.add('active');
+  });
+});
+
+// ── Detail sub-tab switching ──────────────────────────────────────────────
+document.querySelectorAll('.detail-tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.detail-tab-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    document.querySelectorAll('.detail-panel').forEach(p => p.classList.remove('active'));
+    document.getElementById(`dtab-${btn.dataset.dtab}`).classList.add('active');
+    if (btn.dataset.dtab === 'livecharts') updateLiveCharts();
+  });
+});
+
+// ── Helpers ───────────────────────────────────────────────────────────────
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function fmt(v, dec, suf) { return v != null ? Number(v).toFixed(dec) + suf : '—'; }
+function fmtTime(min) {
+  if (min == null || !isFinite(min) || min < 0) return '—';
+  const h = Math.floor(min / 60), m = Math.floor(min % 60);
+  return h ? `${h}h ${String(m).padStart(2,'0')}m` : `${m}m`;
+}
+function socColor(v) {
+  if (v == null) return '#94a3b8';
+  return v < 20 ? '#ef4444' : v < 50 ? '#f97316' : '#22c55e';
+}
+function getDeviceName(mac) {
+  const d = devices.find(d => d.mac === mac);
+  return d ? d.name : mac;
+}
+
+// ── Device cards ──────────────────────────────────────────────────────────
+function renderDeviceCards() {
+  const el = document.getElementById('device-cards');
+  const macs = Object.keys(latestByDevice);
+  if (!macs.length) {
+    el.innerHTML = '<div style="font-size:.72rem;color:var(--text2);text-align:center;padding:.75rem">No devices</div>';
+    return;
+  }
+  el.innerHTML = '';
+  macs.forEach(mac => {
+    const r    = latestByDevice[mac];
+    const name = getDeviceName(mac);
+    const age  = Date.now()/1000 - r.ts;
+    const live = age < 15;
+
+    const card = document.createElement('div');
+    card.className = 'device-card' + (mac === selectedDevice ? ' selected' : '');
+    card.innerHTML = `
+      <div class="dc-row1">
+        <span class="dc-name">${esc(name)}</span>
+        <span class="dc-dot ${live ? 'live' : ''}"></span>
+      </div>
+      <div class="dc-mac">${esc(mac)}</div>
+      <div class="dc-stats">
+        <span style="font-weight:700;color:${socColor(r.soc)}">${r.soc != null ? r.soc.toFixed(1)+'%' : '—'}</span>
+        <span>${r.voltage != null ? r.voltage.toFixed(2)+'V' : '—'}</span>
+        <span>${r.power   != null ? (r.power>=0?'+':'')+r.power.toFixed(1)+'W' : '—'}</span>
+      </div>`;
+    card.addEventListener('click', () => selectDevice(mac));
+    el.appendChild(card);
+  });
+}
+
+function selectDevice(mac) {
+  selectedDevice = mac;
+  renderDeviceCards();
+  document.getElementById('no-device-placeholder').style.display = 'none';
+  document.getElementById('device-detail').style.display = 'flex';
+  document.getElementById('device-detail').style.flexDirection = 'column';
+  updateDashboard();
+  updateLiveCharts();
+}
+
+// ── Dashboard ─────────────────────────────────────────────────────────────
+function updateDashboard() {
+  if (!selectedDevice) return;
+  const r = latestByDevice[selectedDevice];
+  if (!r) return;
+
+  // SOC
+  const socEl = document.getElementById('dash-soc');
+  socEl.textContent = r.soc != null ? r.soc.toFixed(1) + '%' : '—';
+  socEl.className = 'soc-big'
+    + (r.soc != null && r.soc < 20 ? ' soc-low' : '')
+    + (r.soc != null && r.soc >= 20 && r.soc < 50 ? ' soc-mid' : '');
+
+  // Stats
+  document.getElementById('d-voltage').textContent  = fmt(r.voltage,  2, ' V');
+  document.getElementById('d-current').textContent  = fmt(r.current,  2, ' A');
+  document.getElementById('d-power').textContent    = fmt(r.power,    1, ' W');
+  document.getElementById('d-cell-min').textContent = fmt(r.cell_min, 3, ' V');
+  document.getElementById('d-cell-max').textContent = fmt(r.cell_max, 3, ' V');
+  document.getElementById('d-temp-min').textContent = fmt(r.temp_min, 0, ' °C');
+  document.getElementById('d-temp-max').textContent = fmt(r.temp_max, 0, ' °C');
+  document.getElementById('d-mode').textContent     = r.mode || '—';
+  document.getElementById('d-cap').textContent      = '—';
+
+  // Estimates (computed from live buffer, last 120 s)
+  const now   = Date.now() / 1000;
+  const buf   = liveBuffer.filter(x => x.device_id === selectedDevice && x.ts >= now-120 && x.soc != null);
+  let rate = null;
+  if (buf.length >= 2) {
+    const dt = (buf[buf.length-1].ts - buf[0].ts) / 60;
+    if (dt > 0.2) {
+      rate = (buf[buf.length-1].soc - buf[0].soc) / dt;
+      if (Math.abs(rate) < 0.001) rate = null;
+    }
+  }
+  document.getElementById('d-rate').textContent     = rate != null ? rate.toFixed(3) : '—';
+  document.getElementById('d-to-full').textContent  = (rate > 0  && r.soc != null) ? fmtTime((100   - r.soc) / rate)        : '—';
+  document.getElementById('d-to-20').textContent    = (rate < 0  && r.soc != null && r.soc > 20) ? fmtTime((r.soc-20) / Math.abs(rate)) : '—';
+  document.getElementById('d-to-empty').textContent = (rate < 0  && r.soc != null) ? fmtTime(r.soc / Math.abs(rate))        : '—';
+
+  // Errors
+  const errEl = document.getElementById('d-errors');
+  errEl.innerHTML = '';
+  let errors = [];
+  try { errors = r.errors ? JSON.parse(r.errors) : []; } catch {}
+  if (errors.length) {
+    errors.forEach(e => { const li = document.createElement('li'); li.className='err'; li.textContent=e; errEl.appendChild(li); });
+  } else {
+    const li = document.createElement('li'); li.className='ok'; li.textContent='No errors'; errEl.appendChild(li);
+  }
+}
+
+// ── Live Charts ───────────────────────────────────────────────────────────
+function updateLiveCharts() {
+  const cutoff = Date.now()/1000 - liveWindow;
+  const buf = liveBuffer.filter(r => r.ts >= cutoff && r.device_id === selectedDevice);
+  SERIES.forEach(s => {
+    liveCharts[s.key].data.datasets = [makeDataset(s.label, s.color, buf.map(r => ({ x:r.ts*1000, y:r[s.dbCol] })))];
+    liveCharts[s.key].update('none');
+  });
+}
+
+// ── History Charts ────────────────────────────────────────────────────────
+function renderHistCharts() {
+  if (!histData.length) return;
+  const selDev = document.getElementById('hist-device-sel').value;
+  const devIds = selDev ? [selDev] : [...new Set(histData.map(r=>r.device_id))];
+  SERIES.forEach(s => {
+    const chart = histCharts[s.key];
+    chart.data.datasets = devIds.map((mac, di) => {
+      const sub   = histData.filter(r => r.device_id === mac);
+      const color = devIds.length > 1 ? DEVICE_COLORS[di % DEVICE_COLORS.length] : s.color;
+      const label = devIds.length > 1 ? getDeviceName(mac) : s.label;
+      return makeDataset(label, color, sub.map(r => ({ x:r.ts*1000, y:r[s.dbCol] })));
+    });
+    chart.options.plugins.legend.display = devIds.length > 1;
+    if (devIds.length > 1)
+      chart.options.plugins.legend.labels = { boxWidth:10, color:'#94a3b8', font:{size:10} };
+    chart.update('none');
+  });
+}
+
+// ── WebSocket ─────────────────────────────────────────────────────────────
+let ws, wsRetryMs = 1000;
+function connectWS() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws/live`);
+
+  ws.onopen = () => {
+    const el = document.getElementById('ws-status');
+    el.textContent = '● live';
+    el.style.cssText = 'font-size:.7rem;padding:2px 10px;border-radius:9999px;background:#14532d;color:#86efac;border:1px solid #166534';
+    wsRetryMs = 1000;
+    ws._ping = setInterval(() => ws.readyState === 1 && ws.send('ping'), 20000);
+  };
+
+  ws.onmessage = e => {
+    const rows = JSON.parse(e.data);
+    rows.forEach(r => { liveBuffer.push(r); latestByDevice[r.device_id] = r; });
+    const cutoff = Date.now()/1000 - 900;
+    while (liveBuffer.length && liveBuffer[0].ts < cutoff) liveBuffer.shift();
+
+    renderDeviceCards();
+
+    // Auto-select first device if none selected yet
+    if (!selectedDevice && Object.keys(latestByDevice).length) {
+      selectDevice(Object.keys(latestByDevice)[0]);
+    } else if (selectedDevice && rows.some(r => r.device_id === selectedDevice)) {
+      updateDashboard();
+      updateLiveCharts();
+    }
+  };
+
+  ws.onclose = () => {
+    clearInterval(ws._ping);
+    const el = document.getElementById('ws-status');
+    el.textContent = '○ reconnecting…';
+    el.style.cssText = 'font-size:.7rem;padding:2px 10px;border-radius:9999px;background:#451a03;color:#fbbf24;border:1px solid #92400e';
+    setTimeout(connectWS, wsRetryMs);
+    wsRetryMs = Math.min(wsRetryMs * 2, 30000);
+  };
+}
+
+// ── History device dropdown ───────────────────────────────────────────────
+async function loadDevices() {
+  devices = await fetch('/api/devices').then(r=>r.json()).catch(()=>[]);
+  const sel = document.getElementById('hist-device-sel');
+  sel.innerHTML = '<option value="">All devices</option>';
+  devices.forEach(d => {
+    const o = document.createElement('option');
+    o.value = d.mac; o.textContent = d.name;
+    sel.appendChild(o);
+  });
+}
+document.getElementById('hist-device-sel').addEventListener('change', () => {
+  if (histData.length) renderHistCharts();
+});
+
+// ── Window slider ─────────────────────────────────────────────────────────
+document.getElementById('live-window').addEventListener('input', e => {
+  liveWindow = +e.target.value;
+  document.getElementById('live-window-lbl').textContent = `${liveWindow}s`;
+  updateLiveCharts();
+});
+
+// ── History load / export ─────────────────────────────────────────────────
+function toLocalInput(d) {
+  const p = n => String(n).padStart(2,'0');
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+function fromLocalInput(s) {
+  return new Date(s.length === 16 ? s+':00' : s).getTime() / 1000;
+}
+(function defaultRange() {
+  const now = new Date(), prev = new Date(now - 86400000);
+  document.getElementById('h-start').value = toLocalInput(prev);
+  document.getElementById('h-end').value   = toLocalInput(now);
+})();
+
+document.getElementById('h-load').addEventListener('click', async () => {
+  const start = fromLocalInput(document.getElementById('h-start').value);
+  const end   = fromLocalInput(document.getElementById('h-end').value);
+  if (!start || !end) return;
+  document.getElementById('h-status').textContent = 'Loading…';
+  const p = new URLSearchParams({ start, end });
+  const dev = document.getElementById('hist-device-sel').value;
+  if (dev) p.set('device_id', dev);
+  histData = await fetch(`/api/history?${p}`).then(r=>r.json()).catch(()=>[]);
+  document.getElementById('h-status').textContent = histData.length ? `${histData.length} rows` : 'No data';
+  renderHistCharts();
+});
+
+document.getElementById('h-export').addEventListener('click', () => {
+  if (!histData.length) return;
+  const cols = Object.keys(histData[0]);
+  const csv  = [cols.join(','), ...histData.map(r => cols.map(c=>r[c]??'').join(','))].join('\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv],{type:'text/csv'}));
+  a.download = 'bms_export.csv'; a.click();
+});
+
+// ── Init ──────────────────────────────────────────────────────────────────
+loadDevices();
+connectWS();
+</script>
+</body>
+</html>
