@@ -969,6 +969,7 @@ class MainWindow(QMainWindow):
         self.workers: dict[str, BMSWorker] = {}
         self._details: dict[str, DeviceDetailWidget] = {}
         self._device_names: dict[str, str] = {}
+        self._device_display_names: dict[str, str] = {}
         self._robot_mac: str | None = None
 
         from daly_logger.notification_settings import load_settings
@@ -1016,8 +1017,11 @@ class MainWindow(QMainWindow):
         for dev in saved:
             mac = dev.get("mac", "")
             name = dev.get("name", mac)
+            display_name = dev.get("display_name", "")
             if mac and mac not in self.workers:
                 self._add_device(mac, name)
+                if display_name:
+                    self._device_display_names[mac] = display_name
         for dev in saved:
             mac = dev.get("mac", "")
             if dev.get("robot") and mac in self.workers:
@@ -1037,6 +1041,7 @@ class MainWindow(QMainWindow):
     def _persist_devices(self):
         _save_devices([
             {"mac": mac, "name": self._device_names.get(mac, mac),
+             "display_name": self._device_display_names.get(mac, ""),
              "robot": mac == self._robot_mac}
             for mac in self.workers
         ])
@@ -1128,8 +1133,9 @@ class MainWindow(QMainWindow):
             return
 
         if soc < threshold and soc > min_bound and not state.get("notified_low", False):
-            time_to_min = data.get("time_to_empty_min")
-            name = self._device_names.get(mac, mac)
+            worker = self.workers.get(mac)
+            time_to_min = worker._last_estimates.get("time_to_empty_min") if worker else None
+            name = self._device_display_names.get(mac) or self._device_names.get(mac, mac)
             if time_to_min is not None:
                 h = int(time_to_min) // 60
                 m = int(time_to_min) % 60
@@ -1160,7 +1166,7 @@ class MainWindow(QMainWindow):
             return
 
         if soc >= 100 and not state.get("notified_full", False):
-            name = self._device_names.get(mac, mac)
+            name = self._device_display_names.get(mac) or self._device_names.get(mac, mac)
             msg = f"[NOTIFICATION] Battery fully charged on {name}"
             print(msg)
             self._sound_manager.speak(f"Battery fully charged on {name}.")
@@ -1183,22 +1189,22 @@ class MainWindow(QMainWindow):
 
         state["last_mode"] = mode
 
-        if mode == "Charging" and last_mode != "Charging" and not state.get("notified_charging", False):
-            name = self._device_names.get(mac, mac)
+        if mode == "charging" and last_mode != "charging" and not state.get("notified_charging", False):
+            name = self._device_display_names.get(mac) or self._device_names.get(mac, mac)
             worker = self.workers.get(mac)
             time_str = ""
-            if worker and worker._remaining_capacity_ah is not None:
-                estimates = data
+            if worker:
+                estimates = worker._last_estimates
                 time_to_full = estimates.get("time_to_full_min")
                 if time_to_full is not None:
                     h = int(time_to_full) // 60
                     m = int(time_to_full) % 60
-                    time_str = f" {h}h {m:02d}m" if h else f" {m}m"
+                    time_str = f" {h} hour {m:02d}" if h else f" {m} "
             msg = f"[NOTIFICATION] Charging started on {name}{time_str}"
             print(msg)
-            self._sound_manager.speak(f"Battery now charging on {name}.{time_str}")
+            self._sound_manager.speak(f"Battery now charging on {name}.{time_str} minutes")
             state["notified_charging"] = True
-        elif mode != "Charging":
+        elif mode != "charging":
             state["notified_charging"] = False
 
     def _on_devices_file_changed(self, path: str):
