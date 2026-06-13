@@ -1,0 +1,11 @@
+{
+  "volume": 80,
+  "enabled": true,
+  "notifications": {
+    "low_battery": true,
+    "fully_charged": true,
+    "charging_started": true
+  },
+  "low_battery_threshold": 50,
+  "low_battery_min": 5
+}

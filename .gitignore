@@ -9,10 +9,5 @@ wheels/
 # Virtual environments
 .venv
 
-# Runtime files
-bms_log.db
-devices.json
-notification_settings.json
-voices/
 .mimocode/
 
