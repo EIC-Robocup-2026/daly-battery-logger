@@ -11,6 +11,8 @@ import pyqtgraph as pg
 from PyQt5.QtCore import Qt, QFileSystemWatcher, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QFont
 from PyQt5.QtWidgets import (
+    QAction,
+    QCheckBox,
     QDateTimeEdit,
     QDialog,
     QDialogButtonBox,
@@ -22,9 +24,12 @@ from PyQt5.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
+    QMenuBar,
     QPushButton,
     QScrollArea,
     QSlider,
+    QSpinBox,
     QSplitter,
     QStackedWidget,
     QStatusBar,
@@ -822,6 +827,88 @@ class ConnectDialog(QDialog):
 
 
 # ---------------------------------------------------------------------------
+# Notification Settings Dialog
+# ---------------------------------------------------------------------------
+
+class NotificationSettingsDialog(QDialog):
+    def __init__(self, settings: dict, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Notification Settings")
+        self.setMinimumWidth(400)
+        self._settings = dict(settings)
+
+        layout = QVBoxLayout(self)
+
+        self.chk_enabled = QCheckBox("Enable Notifications")
+        self.chk_enabled.setChecked(self._settings.get("enabled", True))
+        layout.addWidget(self.chk_enabled)
+
+        vol_group = QGroupBox("Volume")
+        vol_layout = QHBoxLayout(vol_group)
+        self.vol_slider = QSlider(Qt.Horizontal)
+        self.vol_slider.setMinimum(0)
+        self.vol_slider.setMaximum(100)
+        self.vol_slider.setValue(self._settings.get("volume", 80))
+        self.vol_label = QLabel(f"{self.vol_slider.value()}%")
+        self.vol_slider.valueChanged.connect(
+            lambda v: self.vol_label.setText(f"{v}%")
+        )
+        vol_layout.addWidget(self.vol_slider)
+        vol_layout.addWidget(self.vol_label)
+        layout.addWidget(vol_group)
+
+        notif_group = QGroupBox("Notification Types")
+        notif_layout = QVBoxLayout(notif_group)
+        notifs = self._settings.get("notifications", {})
+        self.chk_low_battery = QCheckBox("Low Battery (Robot, <20%)")
+        self.chk_low_battery.setChecked(notifs.get("low_battery", True))
+        self.chk_fully_charged = QCheckBox("Fully Charged")
+        self.chk_fully_charged.setChecked(notifs.get("fully_charged", True))
+        self.chk_charging = QCheckBox("Charging Started")
+        self.chk_charging.setChecked(notifs.get("charging_started", True))
+        notif_layout.addWidget(self.chk_low_battery)
+        notif_layout.addWidget(self.chk_fully_charged)
+        notif_layout.addWidget(self.chk_charging)
+        layout.addWidget(notif_group)
+
+        threshold_group = QGroupBox("Low Battery Thresholds")
+        threshold_layout = QGridLayout(threshold_group)
+        threshold_layout.addWidget(QLabel("Alert at:"), 0, 0)
+        self.spn_threshold = QSpinBox()
+        self.spn_threshold.setRange(5, 50)
+        self.spn_threshold.setValue(self._settings.get("low_battery_threshold", 20))
+        self.spn_threshold.setSuffix("%")
+        threshold_layout.addWidget(self.spn_threshold, 0, 1)
+        threshold_layout.addWidget(QLabel("Lowest bound:"), 1, 0)
+        self.spn_min = QSpinBox()
+        self.spn_min.setRange(1, 15)
+        self.spn_min.setValue(self._settings.get("low_battery_min", 5))
+        self.spn_min.setSuffix("%")
+        threshold_layout.addWidget(self.spn_min, 1, 1)
+        layout.addWidget(threshold_group)
+
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.accepted.connect(self._save_and_accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+    def _save_and_accept(self):
+        self._settings["enabled"] = self.chk_enabled.isChecked()
+        self._settings["volume"] = self.vol_slider.value()
+        self._settings["notifications"] = {
+            "low_battery": self.chk_low_battery.isChecked(),
+            "fully_charged": self.chk_fully_charged.isChecked(),
+            "charging_started": self.chk_charging.isChecked(),
+        }
+        self._settings["low_battery_threshold"] = self.spn_threshold.value()
+        self._settings["low_battery_min"] = self.spn_min.value()
+        self.accept()
+
+    def get_settings(self) -> dict:
+        return self._settings
+
+
+# ---------------------------------------------------------------------------
 # Main window
 # ---------------------------------------------------------------------------
 
@@ -868,6 +955,12 @@ class MainWindow(QMainWindow):
         self.setStatusBar(status_bar)
         self._status_bar = status_bar
 
+        menu_bar = self.menuBar()
+        settings_menu = menu_bar.addMenu("Settings")
+        self._action_notifications = QAction("Notifications...", self)
+        self._action_notifications.triggered.connect(self._open_notification_settings)
+        settings_menu.addAction(self._action_notifications)
+
         self._overview.add_device_requested.connect(self._on_add_device)
         self._overview.view_device_requested.connect(self._show_device_detail)
         self._overview.remove_device_requested.connect(self._remove_device)
@@ -877,6 +970,13 @@ class MainWindow(QMainWindow):
         self._details: dict[str, DeviceDetailWidget] = {}
         self._device_names: dict[str, str] = {}
         self._robot_mac: str | None = None
+
+        from daly_logger.notification_settings import load_settings
+        from daly_logger.sound_manager import SoundManager
+        self._notif_settings = load_settings()
+        self._sound_manager = SoundManager()
+        self._sound_manager.set_volume(self._notif_settings.get("volume", 80))
+        self._notif_state: dict[str, dict] = {}
 
         self._file_watcher = QFileSystemWatcher()
         if Path(DEVICES_FILE).exists():
@@ -926,6 +1026,14 @@ class MainWindow(QMainWindow):
     def _on_add_device(self):
         self._show_connect_dialog(startup=False)
 
+    def _open_notification_settings(self):
+        from daly_logger.notification_settings import save_settings
+        dlg = NotificationSettingsDialog(self._notif_settings, self)
+        if dlg.exec_() == QDialog.Accepted:
+            self._notif_settings = dlg.get_settings()
+            save_settings(self._notif_settings)
+            self._sound_manager.set_volume(self._notif_settings.get("volume", 80))
+
     def _persist_devices(self):
         _save_devices([
             {"mac": mac, "name": self._device_names.get(mac, mac),
@@ -958,6 +1066,17 @@ class MainWindow(QMainWindow):
             lambda state, m=mac: self._on_connection(m, state)
         )
 
+        self._notif_state[mac] = {
+            "last_soc": None,
+            "last_mode": None,
+            "notified_low": False,
+            "notified_charging": False,
+            "notified_full": False,
+        }
+        worker.soc_updated.connect(lambda data, m=mac: self._check_low_battery(m, data))
+        worker.soc_updated.connect(lambda data, m=mac: self._check_fully_charged(m, data))
+        worker.mosfet_updated.connect(lambda data, m=mac: self._check_charging_state(m, data))
+
         self._device_names[mac] = name
         self.workers[mac] = worker
         worker.start()
@@ -972,6 +1091,7 @@ class MainWindow(QMainWindow):
             worker.stop()
             worker.wait(5000)
         self._device_names.pop(mac, None)
+        self._notif_state.pop(mac, None)
         self._overview.remove_card(mac)
         detail = self._details.pop(mac, None)
         if detail:
@@ -990,6 +1110,96 @@ class MainWindow(QMainWindow):
             card.update_connection(state)
         name = self._device_names.get(mac, mac)
         self._status_bar.showMessage(f"{name}: {state}")
+
+    def _check_low_battery(self, mac: str, data: dict):
+        if mac != self._robot_mac:
+            return
+        if not self._notif_settings.get("enabled", True):
+            return
+        if not self._notif_settings.get("notifications", {}).get("low_battery", True):
+            return
+
+        soc = data.get("soc_percent")
+        state = self._notif_state.get(mac, {})
+        threshold = self._notif_settings.get("low_battery_threshold", 20)
+        min_bound = self._notif_settings.get("low_battery_min", 5)
+
+        if soc is None:
+            return
+
+        if soc < threshold and soc > min_bound and not state.get("notified_low", False):
+            time_to_min = data.get("time_to_empty_min")
+            name = self._device_names.get(mac, mac)
+            if time_to_min is not None:
+                h = int(time_to_min) // 60
+                m = int(time_to_min) % 60
+                time_str = f"{h}h {m:02d}m" if h else f"{m}m"
+                msg = f"[NOTIFICATION] Low battery on {name} ({soc:.1f}%). Time to {min_bound}%: {time_str}"
+                print(msg)
+                self._sound_manager.speak(
+                    f"Battery low on {name}. Estimated time to {min_bound} percent: {time_str}."
+                )
+            else:
+                msg = f"[NOTIFICATION] Low battery on {name} ({soc:.1f}%)"
+                print(msg)
+                self._sound_manager.speak(f"Battery low on {name}.")
+            state["notified_low"] = True
+        elif soc >= threshold + 5:
+            state["notified_low"] = False
+
+    def _check_fully_charged(self, mac: str, data: dict):
+        if not self._notif_settings.get("enabled", True):
+            return
+        if not self._notif_settings.get("notifications", {}).get("fully_charged", True):
+            return
+
+        soc = data.get("soc_percent")
+        state = self._notif_state.get(mac, {})
+
+        if soc is None:
+            return
+
+        if soc >= 100 and not state.get("notified_full", False):
+            name = self._device_names.get(mac, mac)
+            msg = f"[NOTIFICATION] Battery fully charged on {name}"
+            print(msg)
+            self._sound_manager.speak(f"Battery fully charged on {name}.")
+            state["notified_full"] = True
+        elif soc < 95:
+            state["notified_full"] = False
+
+    def _check_charging_state(self, mac: str, data: dict):
+        if not self._notif_settings.get("enabled", True):
+            return
+        if not self._notif_settings.get("notifications", {}).get("charging_started", True):
+            return
+
+        mode = data.get("mode")
+        state = self._notif_state.get(mac, {})
+        last_mode = state.get("last_mode")
+
+        if mode is None:
+            return
+
+        state["last_mode"] = mode
+
+        if mode == "Charging" and last_mode != "Charging" and not state.get("notified_charging", False):
+            name = self._device_names.get(mac, mac)
+            worker = self.workers.get(mac)
+            time_str = ""
+            if worker and worker._remaining_capacity_ah is not None:
+                estimates = data
+                time_to_full = estimates.get("time_to_full_min")
+                if time_to_full is not None:
+                    h = int(time_to_full) // 60
+                    m = int(time_to_full) % 60
+                    time_str = f" {h}h {m:02d}m" if h else f" {m}m"
+            msg = f"[NOTIFICATION] Charging started on {name}{time_str}"
+            print(msg)
+            self._sound_manager.speak(f"Battery now charging on {name}.{time_str}")
+            state["notified_charging"] = True
+        elif mode != "Charging":
+            state["notified_charging"] = False
 
     def _on_devices_file_changed(self, path: str):
         # Re-add after external atomic write (inode replaced)
