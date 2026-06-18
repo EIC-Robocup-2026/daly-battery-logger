@@ -49,6 +49,8 @@ class BMSWorker(QThread):
         self._last_temp: dict | None = None
         self._remaining_capacity_ah: float | None = None
         self._rate_ema: float | None = None
+        self._consecutive_reconnects: int = 0
+        self._last_estimates: dict = {}
 
     def run(self):
         self._loop = asyncio.new_event_loop()
@@ -70,7 +72,10 @@ class BMSWorker(QThread):
 
     async def _connect_with_retry(self):
         self._bms = DalyBMSBluetooth()
-        delay = 2
+        if self._consecutive_reconnects >= 3:
+            delay = 30
+        else:
+            delay = 2
         while not self._stop_event.is_set():
             try:
                 self.connection_changed.emit("connecting")
@@ -80,7 +85,7 @@ class BMSWorker(QThread):
             except Exception as e:
                 self.connection_changed.emit(f"reconnecting ({e})")
                 await asyncio.sleep(delay)
-                delay = min(delay * 2, 30)
+                delay = min(delay * 2, 60)
 
     async def _reconnect(self):
         self.connection_changed.emit("reconnecting")
@@ -163,11 +168,13 @@ class BMSWorker(QThread):
                         record["errors"] = err_list
 
             except Exception:
+                self._consecutive_reconnects += 1
                 self.connection_changed.emit("reconnecting")
                 await self._reconnect()
                 slow_counter = 0
                 continue
 
+            self._consecutive_reconnects = 0
             await asyncio.sleep(1)
 
         self.connection_changed.emit("disconnected")
@@ -213,6 +220,7 @@ class BMSWorker(QThread):
                     ),
                     "time_to_empty_min": remaining / abs_c * 60.0,
                 })
+            self._last_estimates = result
             self.estimates_updated.emit(result)
             return
 
@@ -220,6 +228,7 @@ class BMSWorker(QThread):
         self._rate_ema = None
         hist = self._soc_history
         if len(hist) < _ESTIMATE_MIN_SAMPLES or soc_pct is None:
+            self._last_estimates = null_result
             self.estimates_updated.emit(null_result)
             return
 
@@ -228,8 +237,10 @@ class BMSWorker(QThread):
         slope_per_s = np.polyfit(ts_arr - ts_arr[0], soc_arr, 1)[0]  # %/s
 
         if abs(slope_per_s) < _ESTIMATE_SLOPE_THRESHOLD:
-            self.estimates_updated.emit({"rate_pct_per_min": 0.0, "time_to_full_min": None,
-                                         "time_to_20_min": None, "time_to_empty_min": None})
+            zero_result = {"rate_pct_per_min": 0.0, "time_to_full_min": None,
+                           "time_to_20_min": None, "time_to_empty_min": None}
+            self._last_estimates = zero_result
+            self.estimates_updated.emit(zero_result)
             return
 
         rate = slope_per_s * 60.0  # %/min
@@ -242,4 +253,5 @@ class BMSWorker(QThread):
             result = {"rate_pct_per_min": rate, "time_to_full_min": None,
                       "time_to_20_min": (soc_pct - 20.0) / dr if soc_pct > 20 else None,
                       "time_to_empty_min": soc_pct / dr}
+        self._last_estimates = result
         self.estimates_updated.emit(result)

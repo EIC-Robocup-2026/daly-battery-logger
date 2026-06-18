@@ -109,10 +109,6 @@ class DalyBMSBluetooth(DalyBMS):
                 self.response_cache[command]["future"].set_result(self.response_cache[command]["queue"])
 
     async def _async_char_write(self, command, value):
-        if not self.client.is_connected:
-            self.logger.info("Connecting...")
-            await self.client.connect()
-
         await self.client.write_gatt_char("0000fff2-0000-1000-8000-00805f9b34fb", value)
         self.logger.debug("Waiting...")
         try:
